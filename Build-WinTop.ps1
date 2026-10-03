@@ -1,4 +1,4 @@
-param([string]$ProjectName='Htop',[ValidateSet('Auto','Console','WPF')][string]$ProjectType='Console',[string]$BaseDir='',[switch]$NoLaunch,[int]$MaxRetries=3)
+param([string]$ProjectName='WinTop',[ValidateSet('Auto','Console','WPF')][string]$ProjectType='Console',[string]$BaseDir='',[switch]$NoLaunch,[int]$MaxRetries=3)
 $ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
 $Script:StageName='Initialization';$Script:InstallerPath='';$Script:DotnetDir=Join-Path $env:LOCALAPPDATA 'Microsoft\dotnet';$Script:AppKind='Console'
 function Write-Info([string]$m){Write-Host $m -ForegroundColor Cyan}
@@ -114,6 +114,8 @@ namespace __APPNAME__
         static bool BufferLocked;
         static uint OrigConsoleMode;
         static bool HaveOrigConsoleMode;
+        static ConsoleColor OrigBg = ConsoleColor.Black;
+        static ConsoleColor OrigFg = ConsoleColor.Gray;
 
         const int PROCESS_QUERY_INFORMATION = 0x0400;
         const int PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
@@ -156,7 +158,7 @@ namespace __APPNAME__
         static int Main()
         {
             Console.CursorVisible = false;
-            Console.Title = "htop";
+            Console.Title = "WinTop";
 
             // Remember the original scrollback buffer so we can restore it on exit,
             // then lock the buffer to the window: no scrollbar, no scroll history,
@@ -164,6 +166,16 @@ namespace __APPNAME__
             try { OrigBufferW = Console.BufferWidth; OrigBufferH = Console.BufferHeight; } catch { }
             FitBufferToWindow();
             DisableQuickEdit();
+
+            // Remember the console's original colors so we can put them back on
+            // exit, then switch to our own palette and paint the whole buffer
+            // with it. (Without this, the host's default background - dark blue
+            // in PowerShell - shows through anywhere the app does not paint.)
+            try { OrigBg = Console.BackgroundColor; OrigFg = Console.ForegroundColor; }
+            catch { OrigBg = ConsoleColor.Black; OrigFg = ConsoleColor.Gray; }
+            SetDrawColors();
+            try { Console.Clear(); } catch { }
+
             LoadSettings();
 
             SamplerStop = false;
@@ -172,7 +184,7 @@ namespace __APPNAME__
             // main thread and the sampler thread touch them at the same time
             // can throw (or silently corrupt the readings).
             SampleProcesses();
-            SamplerThread = new Thread(SamplerLoop) { IsBackground = true, Name = "htop-sampler" };
+            SamplerThread = new Thread(SamplerLoop) { IsBackground = true, Name = "wintop-sampler" };
             SamplerThread.Start();
 
             ApplyFilterAndSort();
@@ -219,7 +231,7 @@ namespace __APPNAME__
             {
                 Console.ForegroundColor = ConsoleColor.Red;
                 Console.WriteLine("Fatal: " + ex.Message);
-                Console.ResetColor();
+                SetDrawColors();
                 code = 1;
             }
             finally
@@ -227,9 +239,16 @@ namespace __APPNAME__
                 Console.CursorVisible = true;
                 SamplerStop = true;
                 try { SamplerThread?.Join(1500); } catch { }
-                // Persist preferences, then restore the console to how we found it.
+                // Persist preferences, then restore the console to how we found
+                // it: original colors, original buffer size, clean screen.
                 SaveSettings();
                 RestoreConsoleMode();
+                try
+                {
+                    Console.BackgroundColor = OrigBg;
+                    Console.ForegroundColor = OrigFg;
+                }
+                catch { }
                 try
                 {
                     if (BufferLocked)
@@ -241,8 +260,8 @@ namespace __APPNAME__
 
             Console.WriteLine();
             Console.ForegroundColor = ConsoleColor.Green;
-            Console.WriteLine("htop ended. Press any key to close...");
-            Console.ResetColor();
+            Console.WriteLine("WinTop ended. Press any key to close...");
+            try { Console.BackgroundColor = OrigBg; Console.ForegroundColor = OrigFg; } catch { }
             if (Console.IsInputRedirected) Console.ReadLine();
             else Console.ReadKey(true);
             return code;
@@ -279,7 +298,7 @@ namespace __APPNAME__
         static void DisableQuickEdit()
         {
             // Turn off QuickEdit mark/select mode: clicking the console no longer
-            // drops the app into "Select htop" (freezing the display) or paints
+            // drops the app into "Select WinTop" (freezing the display) or paints
             // little selection-highlight squares on the screen.
             try
             {
@@ -306,9 +325,23 @@ namespace __APPNAME__
             catch { }
         }
 
+        static void SetDrawColors()
+        {
+            // Our palette for the whole app: black background, gray text.
+            // Used everywhere instead of Console.ResetColor(), which would
+            // restore the HOST's default colors (dark blue background in
+            // PowerShell) and make the app look wrong there.
+            try
+            {
+                Console.BackgroundColor = ConsoleColor.Black;
+                Console.ForegroundColor = ConsoleColor.Gray;
+            }
+            catch { }
+        }
+
         static string SettingsPath => Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Htop", "settings.cfg");
+            "WinTop", "settings.cfg");
 
         static void LoadSettings()
         {
@@ -350,7 +383,7 @@ namespace __APPNAME__
                 if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
                 File.WriteAllLines(path, new[]
                 {
-                    "# htop settings - safe to edit by hand",
+                    "# WinTop settings - safe to edit by hand",
                     $"ShowAllProcesses={ShowAllProcesses.ToString().ToLowerInvariant()}",
                     $"SortBy={SortBy}",
                     $"SortDesc={SortDesc.ToString().ToLowerInvariant()}",
@@ -379,16 +412,17 @@ namespace __APPNAME__
             return false;
         }
 
-        static bool ComputeIsSystem(int pid, string name, string path)
+        static bool ComputeIsSystem(int pid, string name, string path, int sessionId)
         {
             if (pid <= 8) return true;
-            if (name.Equals("System", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Idle", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Registry", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Memory Compression", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Secure System", StringComparison.OrdinalIgnoreCase))
-                return true;
-            if (!string.IsNullOrEmpty(path))
+            // Session 0 is the services session: nothing interactive runs there,
+            // so everything in it is a service or a system component.
+            if (sessionId == 0) return true;
+            // Well-known Windows core processes, matched by name too: this keeps
+            // them classified as system even when the image path cannot be read
+            // (protected processes, or a token that cannot open the process).
+            if (CriticalNames.Contains(name)) return true;
+            if (!string.IsNullOrEmpty(path) && !path.Equals("-"))
             {
                 string lower = path.ToLowerInvariant();
                 if (lower.Contains("\\windows\\system32\\") ||
@@ -485,6 +519,13 @@ namespace __APPNAME__
                 {
                     liveIds.Add(p.Id);
 
+                    // Session 0 = the services session. Grab it per-process so
+                    // ComputeIsSystem can tell services apart from user apps.
+                    // (ProcessIdToSessionId needs no handle, so this works for
+                    // every process, including protected ones.)
+                    int sessId = -1;
+                    try { sessId = p.SessionId; } catch { }
+
                     string pname = "";
                     try { pname = p.ProcessName ?? ""; } catch { pname = "?"; }
 
@@ -510,7 +551,13 @@ namespace __APPNAME__
                     double readMBps = 0, writeMBps = 0;
                     string fullPath = "-";
 
-                    IntPtr hProc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_QUERY_LIMITED_INFORMATION, false, p.Id);
+                    // FIX: request QUERY_LIMITED_INFORMATION only. Asking for the
+                    // full QUERY_INFORMATION right at the same time is all-or-nothing:
+                    // SYSTEM-owned and protected processes deny the full right to a
+                    // non-elevated token, so the whole open failed, the image path
+                    // stayed "-", and the system/user classification missed them.
+                    // Limited rights are enough for the path and the IO counters.
+                    IntPtr hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, p.Id);
                     if (hProc != IntPtr.Zero)
                     {
                         try
@@ -537,7 +584,7 @@ namespace __APPNAME__
                         finally { CloseHandle(hProc); }
                     }
 
-                    bool isSys = ComputeIsSystem(p.Id, pname, fullPath);
+                    bool isSys = ComputeIsSystem(p.Id, pname, fullPath, sessId);
 
                     list.Add(new ProcInfo
                     {
@@ -659,9 +706,9 @@ namespace __APPNAME__
                     Console.SetCursorPosition(0, 0);
                     Console.BackgroundColor = ConsoleColor.Black;
                     Console.ForegroundColor = ConsoleColor.Yellow;
-                    Console.WriteLine("Window too small - make it larger to use htop.");
+                    Console.WriteLine("Window too small - make it larger to use WinTop.");
                     Console.WriteLine($"Need at least 70x14, have {rawW}x{rawH}.");
-                    Console.ResetColor();
+                    SetDrawColors();
                 }
                 catch { }
                 return;
@@ -678,9 +725,9 @@ namespace __APPNAME__
             // Title
             Console.BackgroundColor = ConsoleColor.DarkBlue;
             Console.ForegroundColor = ConsoleColor.White;
-            string title = $"  htop  {DateTime.Now:HH:mm:ss}{(Paused ? "  [PAUSED]" : "")}  [{mode}]";
+            string title = $"  WinTop  {DateTime.Now:HH:mm:ss}{(Paused ? "  [PAUSED]" : "")}  [{mode}]";
             Console.Write(title.PadRight(winW).Substring(0, winW));
-            Console.ResetColor();
+            SetDrawColors();
             Console.WriteLine();
 
             // Host line
@@ -740,10 +787,10 @@ namespace __APPNAME__
                 }
             }
 
-            Console.ResetColor();
+            SetDrawColors();
             Console.ForegroundColor = ConsoleColor.DarkGray;
             Console.WriteLine(new string('-', winW));
-            Console.ResetColor();
+            SetDrawColors();
 
             // Column headers
             Console.Write("  ");
@@ -755,7 +802,7 @@ namespace __APPNAME__
             WriteHeaderCell("Name", "NAME", 18); Console.Write(" ");
             int pathWidth = Math.Max(8, winW - 62);
             WriteHeaderCell("Path", "NAME", pathWidth);
-            Console.ResetColor();
+            SetDrawColors();
             Console.WriteLine();
 
             int headerLines = 8 + Math.Max(1, FixedDrives.Count);
@@ -789,7 +836,7 @@ namespace __APPNAME__
                     Console.ForegroundColor = pr.Cpu >= 40 ? ConsoleColor.Red : pr.Cpu >= 10 ? ConsoleColor.Yellow : ConsoleColor.Gray;
                 }
                 Console.WriteLine(line);
-                Console.ResetColor();
+                SetDrawColors();
             }
 
             bool atEnd = ScrollOffset + visible.Count >= FullList.Count;
@@ -797,7 +844,7 @@ namespace __APPNAME__
             {
                 Console.ForegroundColor = ConsoleColor.DarkGray;
                 Console.WriteLine(("  -- end of processes --").PadRight(winW).Substring(0, winW));
-                Console.ResetColor();
+                SetDrawColors();
             }
 
             // Fill remaining lines - this completely prevents the terminal from scrolling.
@@ -808,7 +855,7 @@ namespace __APPNAME__
             Console.BackgroundColor = ConsoleColor.Black;
             Console.ForegroundColor = ConsoleColor.Black;
             for (int j = 0; j < left; j++) Console.WriteLine(new string(' ', winW));
-            Console.ResetColor();
+            SetDrawColors();
 
             // Scroll position indicator: thin scrollbar on the right edge of the
             // process-list area. Dark track, bright thumb shows where you are.
@@ -833,7 +880,7 @@ namespace __APPNAME__
                     Console.BackgroundColor = ConsoleColor.Black;
                     Console.Write(isThumb ? '\u2588' : '\u2502');
                 }
-                Console.ResetColor();
+                SetDrawColors();
             }
             catch { }
 
@@ -872,11 +919,11 @@ namespace __APPNAME__
                 }
                 Console.ForegroundColor = ConsoleColor.Black;
                 if (col < winW) Console.Write(new string(' ', winW - col));
-                Console.ResetColor();
+                SetDrawColors();
             }
             catch { }
             }
-            catch { try { Console.ResetColor(); } catch { } }
+            catch { try { SetDrawColors(); } catch { } }
         }
 
         static void CycleSort(int direction)
@@ -1009,7 +1056,7 @@ namespace __APPNAME__
                 case ConsoleKey.H:
                 case ConsoleKey.F1:
                     Console.Clear();
-                    Console.WriteLine("htop keys");
+                    Console.WriteLine("WinTop keys");
                     Console.WriteLine("  Up/Down        move selection");
                     Console.WriteLine("  PageUp/PageDn  jump one page");
                     Console.WriteLine("  Home/End       jump to first/last");
@@ -1047,7 +1094,7 @@ namespace __APPNAME__
                     Console.BackgroundColor = ConsoleColor.DarkRed;
                     Console.ForegroundColor = ConsoleColor.White;
                     Console.Write(full);
-                    Console.ResetColor();
+                    SetDrawColors();
                 }
                 catch { }
                 var k = Console.ReadKey(true);
@@ -1091,7 +1138,7 @@ namespace __APPNAME__
                 Console.BackgroundColor = ConsoleColor.DarkRed;
                 Console.ForegroundColor = ConsoleColor.White;
                 Console.Write(msg);
-                Console.ResetColor();
+                SetDrawColors();
             }
             catch { }
 
@@ -1189,7 +1236,7 @@ namespace __APPNAME__
                     Console.BackgroundColor = ConsoleColor.DarkYellow;
                     Console.ForegroundColor = ConsoleColor.Black;
                     Console.Write(prompt);
-                    Console.ResetColor();
+                    SetDrawColors();
                 }
                 catch { }
 
@@ -1221,7 +1268,7 @@ namespace __APPNAME__
                     Console.BackgroundColor = ConsoleColor.DarkGreen;
                     Console.ForegroundColor = ConsoleColor.Black;
                     Console.Write(prompt);
-                    Console.ResetColor();
+                    SetDrawColors();
                 }
                 catch { }
 
@@ -1240,7 +1287,7 @@ namespace __APPNAME__
                                 Console.BackgroundColor = ConsoleColor.DarkRed;
                                 Console.ForegroundColor = ConsoleColor.White;
                                 Console.Write(("ERROR: " + ex.Message).PadRight(winW).Substring(0, winW));
-                                Console.ResetColor();
+                                SetDrawColors();
                                 Thread.Sleep(2000);
                             }
                             catch { }
