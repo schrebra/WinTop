@@ -1,6 +1,6 @@
 # WinTop
 
-**WinTop** is a lightweight, interactive terminal process monitor and resource dashboard for Windows, inspired by `top` and `htop`. Built in C# (.NET 8) and distributed with a zero-dependency, automated PowerShell bootstrapper, it compiles into a self-contained, single-file native executable (`win-x64`) that runs on any modern Windows system without requiring pre-installed runtimes or administrative elevation.
+**WinTop** is a lightweight, interactive terminal process monitor and resource dashboard for Windows, inspired by `top` and `htop`. Built in C# (.NET 8) or c++ and distributed with a zero-dependency, automated PowerShell bootstrapper, it compiles into a self-contained, single-file native executable (`win-x64`) that runs on any modern Windows system without requiring pre-installed runtimes or administrative elevation.
 
 ![WinTop Screenshot](Screenshots/2026-10-02_185441.png)
 
