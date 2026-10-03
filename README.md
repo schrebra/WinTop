@@ -48,4 +48,4 @@ The included PowerShell script handles disk space validation, user-local SDK man
 2. Run the bootstrapper script:
 
 ```powershell
-.\build.ps1
+.\Build-WinTop.ps1
