@@ -83,23 +83,18 @@ function Find-Compiler{
   # 4) portable Zig toolchain, downloaded user-local, zero elevation
   return Install-ZigToolchain
 }
-function Write-SourceFiles([string]$Dir,[string]$Name,[bool]$WantIcon){
+function Write-SourceFiles([string]$Dir,[string]$Name){
+  # The application icon is no longer baked in at compile time: Set-ExeIcon
+  # stamps it into the finished exe afterwards, which works on every compiler
+  # path (the Zig toolchain has no resource compiler, so the old .rc approach
+  # could never cover it).
   $utf8NoBom=New-Object System.Text.Utf8Encoding($false)
   [IO.File]::WriteAllText((Join-Path $Dir ($Name+'.cpp')),$cppCode.Replace('__APPNAME__',$Name),$utf8NoBom)
-  if($WantIcon){
-    if($PSScriptRoot){
-      $icoSrc=Join-Path $PSScriptRoot 'wintop.ico'
-      if(Test-Path -LiteralPath $icoSrc){Copy-Item -LiteralPath $icoSrc -Destination (Join-Path $Dir 'wintop.ico') -Force;Write-Ok 'Embedded your wintop.ico as the application icon.'}
-    }
-    [IO.File]::WriteAllText((Join-Path $Dir ($Name+'.rc')),'1 ICON "wintop.ico"'+[Environment]::NewLine,[Text.Encoding]::ASCII)
-  }
 }
-function Build-WithMsvc([hashtable]$C,[string]$Dir,[string]$Name,[bool]$HasRc){
+function Build-WithMsvc([hashtable]$C,[string]$Dir,[string]$Name){
   $lines=New-Object Collections.Generic.List[string]
   if($C.VcVars){$lines.Add('call "'+$C.VcVars+'" >NUL')}
-  if($HasRc){$lines.Add('rc /nologo "'+$Name+'.rc"');$lines.Add('if errorlevel 1 exit /b 1')}
-  $res=if($HasRc){' "'+$Name+'.res"'}else{''}
-  $lines.Add('cl /nologo /O2 /EHsc /std:c++17 /utf-8 /DUNICODE /D_UNICODE "'+$Name+'.cpp"'+$res+' /Fe:"'+$Name+'.exe"')
+  $lines.Add('cl /nologo /O2 /EHsc /std:c++17 /utf-8 /DUNICODE /D_UNICODE "'+$Name+'.cpp" /Fe:"'+$Name+'.exe"')
   $lines.Add('if errorlevel 1 exit /b 1')
   [IO.File]::WriteAllLines((Join-Path $Dir 'build.bat'),$lines,[Text.Encoding]::ASCII)
   Push-Location -LiteralPath $Dir
@@ -107,9 +102,8 @@ function Build-WithMsvc([hashtable]$C,[string]$Dir,[string]$Name,[bool]$HasRc){
   finally{Pop-Location}
 }
 function Invoke-Gcc([string]$Exe,[string[]]$GccArgs,[string]$Dir){Push-Location -LiteralPath $Dir;try{& $Exe @GccArgs}finally{Pop-Location};return $LASTEXITCODE}
-function Build-WithGcc([hashtable]$C,[string]$Dir,[string]$Name,[bool]$HasRc){
+function Build-WithGcc([hashtable]$C,[string]$Dir,[string]$Name){
   $gccArgs=@('-O2','-std=c++17','-municode','-static','-static-libgcc','-static-libstdc++','-o',($Name+'.exe'),($Name+'.cpp'))
-  if($HasRc){$gccArgs+=($Name+'.rc')}
   $gccArgs+=@('-lpsapi')
   $code=Invoke-Gcc -Exe $C.Exe -GccArgs $gccArgs -Dir $Dir
   if($code -ne 0){
@@ -126,6 +120,352 @@ function Build-WithZig([hashtable]$C,[string]$Dir,[string]$Name){
   finally{Pop-Location}
 }
 function Start-BuiltApp([string]$Exe,[string]$WorkDir){try{Start-Process -FilePath $Exe -WorkingDirectory $WorkDir;return $true}catch{Write-Warn2 "Auto-launch failed: $($_.Exception.Message)";Write-Warn2 'The executable itself is valid and complete - start it manually by double-clicking:';Write-Warn2 "    $Exe";return $false}}
+# ----------------------------------------------------------------------------
+# Embedded application icon: the official htop logo (htop.svg, htop-dev/htop),
+# pre-rendered to 16/32/48/256 px and packed as a classic .ico, base64 below.
+# Set-ExeIcon stamps it into the finished exe as icon resource #1 through the
+# Win32 resource-update API (BeginUpdateResource/UpdateResource/EndUpdateResource).
+# That single icon feeds BOTH the taskbar button and the console window's
+# title-bar icon (Windows uses the exe's first icon for both), and it works
+# identically on the MSVC, MinGW and Zig build paths -- the Zig toolchain has
+# no resource compiler, so the old .rc approach could never cover it.
+# ----------------------------------------------------------------------------
+$Script:WinTopIconB64=@'
+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
+AABJRU5ErkJggg==
+'@
+function Set-ExeIcon([string]$Exe){
+  Write-Info 'Stamping the htop icon into the executable (taskbar + window icon)...'
+  $raw=[Convert]::FromBase64String(($Script:WinTopIconB64 -replace '\s',''))
+  if([BitConverter]::ToUInt16($raw,0) -ne 0 -or [BitConverter]::ToUInt16($raw,2) -ne 1){Throw-Code 5 'Embedded icon data is corrupt (not an .ico file).'}
+  $count=[BitConverter]::ToUInt16($raw,4)
+  if($count -lt 1 -or $count -gt 32){Throw-Code 5 "Embedded icon data is corrupt (image count $count)."}
+  $cs=@'
+using System;
+using System.Runtime.InteropServices;
+public static class WinTopIconStamper {
+    [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+    public static extern IntPtr BeginUpdateResource(string fileName, bool deleteExisting);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool UpdateResource(IntPtr hUpdate, IntPtr type, IntPtr name, ushort lang, byte[] data, uint size);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool EndUpdateResource(IntPtr hUpdate, bool discard);
+    public static bool WriteIconImage(IntPtr h, int id, byte[] data) {
+        return UpdateResource(h, new IntPtr(3), new IntPtr(id), 0, data, (uint)data.Length);
+    }
+    public static bool WriteIconGroup(IntPtr h, byte[] data) {
+        return UpdateResource(h, new IntPtr(14), new IntPtr(1), 0, data, (uint)data.Length);
+    }
+    public static int LastError() { return Marshal.GetLastWin32Error(); }
+}
+'@
+  try{Add-Type -TypeDefinition $cs -ErrorAction Stop}
+  catch{Throw-Code 5 "Could not compile the icon-stamping helper: $($_.Exception.Message)"}
+  # Parse the .ico directory: ICONDIR + one 16-byte ICONDIRENTRY per image.
+  $imgs=@()
+  for($i=0;$i -lt $count;$i++){
+    $o=6+$i*16
+    $len=[BitConverter]::ToUInt32($raw,$o+8)
+    $off=[BitConverter]::ToUInt32($raw,$o+12)
+    if(($off+$len) -gt $raw.Length){Throw-Code 5 "Embedded icon data is corrupt (image $i out of range)."}
+    $bytes=New-Object byte[] $len
+    [Buffer]::BlockCopy($raw,[int]$off,$bytes,0,[int]$len)
+    $imgs+=[pscustomobject]@{W=$raw[$o];H=$raw[$o+1];CC=$raw[$o+2];Planes=[BitConverter]::ToUInt16($raw,$o+4);Bpp=[BitConverter]::ToUInt16($raw,$o+6);Len=$len;Data=$bytes}
+  }
+  $h=[WinTopIconStamper]::BeginUpdateResource($Exe,$false)
+  if($h -eq [IntPtr]::Zero){Throw-Code 5 "Could not open '$Exe' for icon stamping (Win32 error $([WinTopIconStamper]::LastError()))."}
+  try{
+    # Each image becomes an RT_ICON (type 3) resource with a numeric id...
+    $id=1
+    foreach($im in $imgs){
+      if(-not [WinTopIconStamper]::WriteIconImage($h,$id,$im.Data)){Throw-Code 5 "Failed writing icon image $id (Win32 error $([WinTopIconStamper]::LastError()))."}
+      $id++
+    }
+    # ...and the RT_GROUP_ICON (type 14) directory points at those ids.
+    $ms=New-Object IO.MemoryStream
+    $bw=New-Object IO.BinaryWriter($ms)
+    $bw.Write([uint16]0);$bw.Write([uint16]1);$bw.Write([uint16]$count)
+    $id=1
+    foreach($im in $imgs){
+      $bw.Write([byte]$im.W);$bw.Write([byte]$im.H);$bw.Write([byte]$im.CC);$bw.Write([byte]0)
+      $bw.Write([uint16]$im.Planes);$bw.Write([uint16]$im.Bpp);$bw.Write([uint32]$im.Len);$bw.Write([uint16]$id)
+      $id++
+    }
+    $bw.Flush()
+    if(-not [WinTopIconStamper]::WriteIconGroup($h,$ms.ToArray())){Throw-Code 5 "Failed writing the icon directory (Win32 error $([WinTopIconStamper]::LastError()))."}
+    if(-not [WinTopIconStamper]::EndUpdateResource($h,$false)){Throw-Code 5 "Failed committing the icon resources (Win32 error $([WinTopIconStamper]::LastError()))."}
+  }catch{
+    try{[WinTopIconStamper]::EndUpdateResource($h,$true)|Out-Null}catch{}
+    throw
+  }
+  Write-Ok 'Icon stamped: the taskbar button and the console window now use the htop artwork.'
+}
 # ----------------------------------------------------------------------------
 # Embedded application source (native C++, no .NET). __APPNAME__ is replaced
 # with the project name when the sources are written out.
@@ -1444,21 +1784,16 @@ $Script:Compiler=Find-Compiler
 Write-Ok "Using: $($Script:Compiler.Desc)"
 $Script:StageName='Writing sources'
 Write-Stage '4/7' 'Writing the C++ application sources'
-$wantIcon=$false
-if($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'wintop.ico'))){
-  if($Script:Compiler.Kind -eq 'zig'){Write-Warn2 'Note: the Zig toolchain has no resource compiler, so wintop.ico will not be embedded this run (app still builds fine).'}
-  else{$wantIcon=$true}
-}
-Write-SourceFiles -Dir $ProjectDir -Name $ProjectName -WantIcon $wantIcon
+Write-SourceFiles -Dir $ProjectDir -Name $ProjectName
 Write-Ok 'Application sources written.'
 $Script:StageName='Build'
 Write-Stage '5/7' "Compiling with $($Script:Compiler.Kind) (Release, optimized)"
-if($Script:Compiler.Kind -eq 'msvc'){Build-WithMsvc -C $Script:Compiler -Dir $ProjectDir -Name $ProjectName -HasRc $wantIcon}
+if($Script:Compiler.Kind -eq 'msvc'){Build-WithMsvc -C $Script:Compiler -Dir $ProjectDir -Name $ProjectName}
 elseif($Script:Compiler.Kind -eq 'zig'){Build-WithZig -C $Script:Compiler -Dir $ProjectDir -Name $ProjectName}
-else{Build-WithGcc -C $Script:Compiler -Dir $ProjectDir -Name $ProjectName -HasRc $wantIcon}
+else{Build-WithGcc -C $Script:Compiler -Dir $ProjectDir -Name $ProjectName}
 Write-Ok 'Build completed with exit code 0.'
 $Script:StageName='Artifact verification'
-Write-Stage '6/7' 'Verifying the built executable'
+Write-Stage '6/7' 'Verifying the built executable and stamping the icon'
 $exe=Join-Path $ProjectDir ($ProjectName+'.exe')
 if(-not (Test-Path -LiteralPath $exe)){Start-Sleep -Seconds 3}
 if(-not (Test-Path -LiteralPath $exe)){Throw-Code 5 "Build reported success but '$exe' does not exist. Antivirus may have quarantined it."}
@@ -1466,6 +1801,7 @@ $size=(Get-Item -LiteralPath $exe).Length
 if($size -lt 100KB){Throw-Code 5 "The built exe is only $size bytes - far too small; the link step must have failed."}
 $sizeMb=[math]::Round($size/1MB,1)
 Write-Ok "Executable verified: $exe ($sizeMb MB)"
+Set-ExeIcon -Exe $exe
 $Script:StageName='Launch'
 if($NoLaunch){Write-Stage '7/7' 'Auto-launch skipped (-NoLaunch was provided)';Write-Info "Run the app anytime by double-clicking: $exe"}
 else{Write-Stage '7/7' 'Launching the freshly built application';if(-not (Start-BuiltApp -Exe $exe -WorkDir $ProjectDir)){exit 6}}
